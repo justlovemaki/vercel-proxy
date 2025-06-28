@@ -2,8 +2,6 @@
 
 这是一个部署在 Vercel 上的轻量级 API 代理服务，专为解决跨域（CORS）问题、隐藏敏感凭证而设计。
 
-[![一键部署到 Vercel](https://vercel.com/button)](https://vercel.com/import/project?template=https://github.com/justlovemaki/vercel-proxy)
-
 ---
 
 ## ✨ 核心特性
