@@ -50,7 +50,7 @@ export default async function handler(request: Request) {
   headers.delete('host');
   headers.set('X-Forwarded-Host', url.host); // 仍然使用原始请求的 host
   headers.set('X-Forwarded-Proto', url.protocol.slice(0, -1));
-  headers.set('User-Agent', 'v2rayN');
+  headers.set('User-Agent', 'clash-verge/v1.6.6');
 
 
   try {
