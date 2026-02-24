@@ -10,29 +10,42 @@ const ALLOWED_TARGETS = ALLOWED_TARGETS_STR.split(',').map(s => s.trim()).filter
 const HEADERS_TO_REMOVE_STR = process.env.HEADERS_TO_REMOVE || '';
 
 export default async function handler(request: Request) {
-  const rawUrl = request.url; // 获取最原始的请求链接
-  const url = new URL(rawUrl);
+  const url = new URL(request.url);
 
-  // 1. 【核心终极优化】：放弃 searchParams 解析，直接暴力截取字符串
-  // 这样无论目标链接里有几个 `?` 几个 `&`，都不会被框架吃掉参数
-  const targetKey = 'target=';
-  const targetIndex = rawUrl.indexOf(targetKey);
-
-  if (targetIndex === -1) {
+  // 1. 获取 target 参数。
+  // 注意：url.searchParams.get 会【自动解码】带有 %3A 等转义字符的 URL
+  const targetParam = url.searchParams.get('target');
+  if (!targetParam) {
     return new Response('Bad Request: "target" query parameter is required.', { status: 400 });
   }
 
-  // 截取 target= 后面的所有字符，得到的就是完美的完整微信 URL
-  const finalTargetUrl = rawUrl.substring(targetIndex + targetKey.length);
-
   let targetUrlObj: URL;
   try {
-    targetUrlObj = new URL(finalTargetUrl);
+    targetUrlObj = new URL(targetParam);
   } catch (error) {
-    return new Response('Bad Request: Invalid "target" query parameter.', { status: 400 });
+    // 错误提示里打印出实际接收到的值，方便查错
+    return new Response(`Bad Request: Invalid target URL. Received: ${targetParam}`, { status: 400 });
   }
 
-  // 2. 检查目标域名是否在白名单内
+  // 2. 【核心修复】：将被 '&' 截断的微信参数完美组装回去
+  // 遍历你请求中的所有参数，把属于微信API的参数塞回目标链接里
+  url.searchParams.forEach((value, key) => {
+    // 排除掉代理服务本身的参数（target 以及可能被底层框架加上的 path）
+    if (key !== 'target' && key !== 'path') {
+      // 只有当目标 URL 里还没有这个参数时才添加，防止转义链接导致参数重复
+      if (!targetUrlObj.searchParams.has(key)) {
+        targetUrlObj.searchParams.append(key, value);
+      }
+    }
+  });
+
+  // 3. 生成最终的请求 URL
+  const finalTargetUrl = targetUrlObj.toString();
+  
+  // 你可以在服务器控制台查看这行日志，这里的链接一定 100% 完整，grant_type 绝对不会丢
+  console.log('Proxying to:', finalTargetUrl); 
+
+  // 4. 检查目标域名是否在白名单内
   if (ALLOWED_TARGETS.length > 0) {
     const targetDomain = targetUrlObj.hostname;
     const isAllowed = ALLOWED_TARGETS.some(allowedDomain => 
@@ -43,9 +56,7 @@ export default async function handler(request: Request) {
     }
   }
 
-  console.log('Proxying to:', finalTargetUrl); // 这里的日志打印出来一定是包含 grant_type 的完整链接
-
-  // 3. 处理 headers
+  // 5. 处理 headers
   const headers = new Headers(request.headers);
   const headersToRemove = HEADERS_TO_REMOVE_STR.split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
   
@@ -58,7 +69,7 @@ export default async function handler(request: Request) {
   headers.set('X-Forwarded-Proto', url.protocol.slice(0, -1));
 
   try {
-    // 4. 使用截取出的完整 finalTargetUrl 发起请求
+    // 6. 使用组装好的终极 finalTargetUrl 发起请求
     const response = await fetch(finalTargetUrl, {
       method: request.method,
       headers: headers,
