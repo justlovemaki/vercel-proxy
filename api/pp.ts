@@ -1,51 +1,57 @@
 // /api/proxy/[[...path]].ts
 
 export const config = {
-  runtime: 'edge',
+  runtime: 'edge', // 必须保留，确保 fetch API 兼容性
 };
 
-// 白名单及 header 移除配置
+// 环境变量处理
 const ALLOWED_TARGETS_STR = process.env.ALLOWED_TARGETS || '';
 const ALLOWED_TARGETS = ALLOWED_TARGETS_STR.split(',').map(s => s.trim()).filter(Boolean);
 const HEADERS_TO_REMOVE_STR = process.env.HEADERS_TO_REMOVE || '';
 
 export default async function handler(request: Request) {
-  const url = new URL(request.url);
+  // 1. 获取完整的请求 URL 字符串
+  // 注意：在某些环境下 request.url 可能是相对路径（如 /api/pp?...），这会导致 new URL() 报错
+  // 所以我们先把它标准化成一个绝对路径
+  const baseHost = 'http://localhost'; 
+  const fullReqUrl = request.url.startsWith('http') ? request.url : baseHost + request.url;
+  
+  // 2. 核心：手动提取 target= 后面的所有内容
+  // 我们不信任 url.searchParams，因为他会自作聪明地把 grant_type 切走
+  const targetKey = 'target=';
+  const targetIndex = fullReqUrl.indexOf(targetKey);
 
-  // 1. 获取 target 参数。
-  // 注意：url.searchParams.get 会【自动解码】带有 %3A 等转义字符的 URL
-  const targetParam = url.searchParams.get('target');
-  if (!targetParam) {
+  if (targetIndex === -1) {
     return new Response('Bad Request: "target" query parameter is required.', { status: 400 });
   }
 
-  let targetUrlObj: URL;
+  // 截取 target= 之后的所有字符
+  // 例如：...target=https://api.weixin.qq.com...?a=1&b=2
+  // 截取结果：https://api.weixin.qq.com...?a=1&b=2 (包含所有的 & 符号)
+  let finalTargetUrl = fullReqUrl.substring(targetIndex + targetKey.length);
+
+  // 3. 修复 "Invalid URL" 问题
+  // 如果用户实际上转义了 URL (比如 %3A%2F)，我们需要解码一次
+  // 但如果用户没转义 (直接是 https://)，decodeURIComponent 也不会报错
   try {
-    targetUrlObj = new URL(targetParam);
-  } catch (error) {
-    // 错误提示里打印出实际接收到的值，方便查错
-    return new Response(`Bad Request: Invalid target URL. Received: ${targetParam}`, { status: 400 });
+    // 只有当看起来是被编码过的时候才尝试解码（防止过度解码破坏内部参数）
+    if (finalTargetUrl.includes('%3A') || finalTargetUrl.includes('%3a')) {
+        finalTargetUrl = decodeURIComponent(finalTargetUrl);
+    }
+  } catch (e) {
+    // 解码失败就算了，用原始的
   }
 
-  // 2. 【核心修复】：将被 '&' 截断的微信参数完美组装回去
-  // 遍历你请求中的所有参数，把属于微信API的参数塞回目标链接里
-  url.searchParams.forEach((value, key) => {
-    // 排除掉代理服务本身的参数（target 以及可能被底层框架加上的 path）
-    if (key !== 'target' && key !== 'path') {
-      // 只有当目标 URL 里还没有这个参数时才添加，防止转义链接导致参数重复
-      if (!targetUrlObj.searchParams.has(key)) {
-        targetUrlObj.searchParams.append(key, value);
-      }
-    }
-  });
+  console.log('🔗 Final Proxy URL:', finalTargetUrl); // 看日志！这里必须是完整的长链接
 
-  // 3. 生成最终的请求 URL
-  const finalTargetUrl = targetUrlObj.toString();
-  
-  // 你可以在服务器控制台查看这行日志，这里的链接一定 100% 完整，grant_type 绝对不会丢
-  console.log('Proxying to:', finalTargetUrl); 
+  // 4. 验证 URL 合法性及白名单
+  let targetUrlObj: URL;
+  try {
+    targetUrlObj = new URL(finalTargetUrl);
+  } catch (error) {
+    return new Response(`Bad Request: Invalid target URL. Got: ${finalTargetUrl}`, { status: 400 });
+  }
 
-  // 4. 检查目标域名是否在白名单内
   if (ALLOWED_TARGETS.length > 0) {
     const targetDomain = targetUrlObj.hostname;
     const isAllowed = ALLOWED_TARGETS.some(allowedDomain => 
@@ -56,25 +62,28 @@ export default async function handler(request: Request) {
     }
   }
 
-  // 5. 处理 headers
+  // 5. 处理 Headers
   const headers = new Headers(request.headers);
   const headersToRemove = HEADERS_TO_REMOVE_STR.split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
   
-  for (const headerName of headersToRemove) { 
-    headers.delete(headerName); 
-  }
+  for (const headerName of headersToRemove) { headers.delete(headerName); }
   
   headers.delete('host');
-  headers.set('X-Forwarded-Host', url.host); 
-  headers.set('X-Forwarded-Proto', url.protocol.slice(0, -1));
-
+  // 这里的 host 应该是你代理服务器的 host
   try {
-    // 6. 使用组装好的终极 finalTargetUrl 发起请求
+      const reqUrlObj = new URL(fullReqUrl);
+      headers.set('X-Forwarded-Host', reqUrlObj.host);
+      headers.set('X-Forwarded-Proto', reqUrlObj.protocol.slice(0, -1));
+  } catch (e) {}
+
+
+  // 6. 发起请求
+  try {
     const response = await fetch(finalTargetUrl, {
       method: request.method,
       headers: headers,
       body: request.body,
-      redirect: 'manual', 
+      redirect: 'manual',
     });
     
     return new Response(response.body, { 
@@ -84,6 +93,6 @@ export default async function handler(request: Request) {
     });
   } catch (error) {
     console.error('Proxy error:', error);
-    return new Response('Proxy error', { status: 500 });
+    return new Response('Proxy error: ' + String(error), { status: 500 });
   }
 }
