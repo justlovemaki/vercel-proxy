@@ -10,28 +10,27 @@ const ALLOWED_TARGETS = ALLOWED_TARGETS_STR.split(',').map(s => s.trim()).filter
 const HEADERS_TO_REMOVE_STR = process.env.HEADERS_TO_REMOVE || '';
 
 export default async function handler(request: Request) {
-  const url = new URL(request.url);
+  const rawUrl = request.url; // 获取最原始的请求链接
+  const url = new URL(rawUrl);
 
-  // 1. 获取 target 参数
-  const targetParam = url.searchParams.get('target');
-  if (!targetParam) {
+  // 1. 【核心终极优化】：放弃 searchParams 解析，直接暴力截取字符串
+  // 这样无论目标链接里有几个 `?` 几个 `&`，都不会被框架吃掉参数
+  const targetKey = 'target=';
+  const targetIndex = rawUrl.indexOf(targetKey);
+
+  if (targetIndex === -1) {
     return new Response('Bad Request: "target" query parameter is required.', { status: 400 });
   }
 
+  // 截取 target= 后面的所有字符，得到的就是完美的完整微信 URL
+  const finalTargetUrl = rawUrl.substring(targetIndex + targetKey.length);
+
   let targetUrlObj: URL;
   try {
-    targetUrlObj = new URL(targetParam);
+    targetUrlObj = new URL(finalTargetUrl);
   } catch (error) {
     return new Response('Bad Request: Invalid "target" query parameter.', { status: 400 });
   }
-
-  // 【核心优化点】：将被 '&' 截断的未转义参数（如 appid, secret 等）重新挂载回目标 URL
-  url.searchParams.forEach((value, key) => {
-    // 排除掉代理服务本身的 'target' 参数
-    if (key !== 'target') {
-      targetUrlObj.searchParams.append(key, value);
-    }
-  });
 
   // 2. 检查目标域名是否在白名单内
   if (ALLOWED_TARGETS.length > 0) {
@@ -44,11 +43,9 @@ export default async function handler(request: Request) {
     }
   }
 
-  // 3. 生成最终的请求 URL
-  const finalTargetUrl = targetUrlObj.toString();
-  console.log('Proxying to:', finalTargetUrl); // 调试日志：确认完整链接正确
+  console.log('Proxying to:', finalTargetUrl); // 这里的日志打印出来一定是包含 grant_type 的完整链接
 
-  // 4. 处理 headers
+  // 3. 处理 headers
   const headers = new Headers(request.headers);
   const headersToRemove = HEADERS_TO_REMOVE_STR.split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
   
@@ -57,17 +54,16 @@ export default async function handler(request: Request) {
   }
   
   headers.delete('host');
-  // 保持原始请求的 host 和协议
   headers.set('X-Forwarded-Host', url.host); 
   headers.set('X-Forwarded-Proto', url.protocol.slice(0, -1));
 
   try {
-    // 5. 使用组装好的 finalTargetUrl 发起请求
+    // 4. 使用截取出的完整 finalTargetUrl 发起请求
     const response = await fetch(finalTargetUrl, {
       method: request.method,
       headers: headers,
       body: request.body,
-      redirect: 'manual', // 视需求而定，也可以改成 'follow' 以自动跟随重定向
+      redirect: 'manual', 
     });
     
     return new Response(response.body, { 
